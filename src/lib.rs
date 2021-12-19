@@ -1,12 +1,12 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take},
-    character::complete::{alpha1, alphanumeric1},
+    character::complete::{alpha1, alphanumeric1, one_of},
     combinator::opt,
     error::{context, ErrorKind, VerboseError},
     multi::{many1, many_m_n},
     sequence::{separated_pair, terminated, tuple},
-    AsChar, IResult, InputTakeAtPosition,
+    AsChar, Err as NomErr, IResult, InputTakeAtPosition,
 };
 
 #[allow(dead_code)]
@@ -79,11 +79,11 @@ fn host(input: &str) -> Res<&str, Host> {
             tuple((many_m_n(1, 1, alphanumerichyphen1), take(0 as usize))),
         )),
     )(input)
-    .map(|(next_input, mut res)| {
-        if !res.1.is_empty() {
-            res.0.push(res.1);
+    .map(|(next_input, (mut list, single))| {
+        if !single.is_empty() {
+            list.push(single);
         }
-        (next_input, Host::HOST(res.0.join(".")))
+        (next_input, Host::HOST(list.join(".")))
     })
 }
 
@@ -102,6 +102,22 @@ where
     )
 }
 
+fn ip_num(input: &str) -> Res<&str, u8> {
+    context("ip number", n_to_m_digits(1, 3))(input).and_then(|(next_input, result)| {
+        match result.parse::<u8>() {
+            Ok(n) => Ok((next_input, n)),
+            Err(_) => Err(NomErr::Error(VerboseError { errors: vec![] })),
+        }
+    })
+}
+
+fn n_to_m_digits<'a>(n: usize, m: usize) -> impl FnMut(&'a str) -> Res<&str, String> {
+    move |input| {
+        many_m_n(n, m, one_of("0123456789"))(input)
+            .map(|(next_input, result)| (next_input, result.into_iter().collect()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -110,6 +126,12 @@ mod tests {
         error::{ErrorKind, VerboseError, VerboseErrorKind},
         Err as NomErr,
     };
+
+    #[test]
+    fn test_n_to_m_digits() {
+        let mut one_digit = n_to_m_digits(1, 1);
+        assert_eq!(one_digit("123"), Ok(("23", String::from("1"))));
+    }
 
     #[test]
     fn test_scheme() {
