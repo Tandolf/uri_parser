@@ -4,7 +4,7 @@ use nom::{
     character::complete::{alpha1, alphanumeric1, one_of},
     combinator::opt,
     error::{context, ErrorKind, VerboseError},
-    multi::{many1, many_m_n},
+    multi::{count, many0, many1, many_m_n},
     sequence::{separated_pair, terminated, tuple},
     AsChar, Err as NomErr, IResult, InputTakeAtPosition,
 };
@@ -71,6 +71,10 @@ fn authority(input: &str) -> Res<&str, (&str, Option<&str>)> {
 }
 
 #[allow(dead_code)]
+fn ip_or_host(input: &str) -> Res<&str, Host> {
+    context("ip or host", alt((ip, host)))(input)
+}
+
 fn host(input: &str) -> Res<&str, Host> {
     context(
         "host",
@@ -87,7 +91,6 @@ fn host(input: &str) -> Res<&str, Host> {
     })
 }
 
-#[allow(dead_code)]
 fn alphanumerichyphen1<T>(i: T) -> Res<T, T>
 where
     T: InputTakeAtPosition,
@@ -100,6 +103,22 @@ where
         },
         ErrorKind::AlphaNumeric,
     )
+}
+
+fn ip(input: &str) -> Res<&str, Host> {
+    context(
+        "ip",
+        tuple((count(terminated(ip_num, tag(".")), 3), ip_num)),
+    )(input)
+    .map(|(next_input, (values, last_number))| {
+        let mut result: [u8; 4] = [0, 0, 0, 0];
+        values
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, v)| result[i] = v);
+        result[3] = last_number;
+        (next_input, Host::IP(result))
+    })
 }
 
 fn ip_num(input: &str) -> Res<&str, u8> {
@@ -118,6 +137,68 @@ fn n_to_m_digits<'a>(n: usize, m: usize) -> impl FnMut(&'a str) -> Res<&str, Str
     }
 }
 
+#[allow(dead_code)]
+fn path(input: &str) -> Res<&str, Vec<&str>> {
+    context(
+        "path",
+        tuple((
+            tag("/"),
+            many0(terminated(url_code_points, tag("/"))),
+            opt(url_code_points),
+        )),
+    )(input)
+    .map(|(next_input, res)| {
+        let mut path: Vec<&str> = res.1.iter().map(|p| p.to_owned()).collect();
+        if let Some(last) = res.2 {
+            path.push(last);
+        }
+        (next_input, path)
+    })
+}
+
+fn url_code_points<T>(i: T) -> Res<T, T>
+where
+    T: InputTakeAtPosition,
+    <T as InputTakeAtPosition>::Item: AsChar,
+{
+    i.split_at_position1_complete(
+        |item| {
+            let char_item = item.as_char();
+            char_item != '-' && !char_item.is_alphanum() && char_item != '.'
+        },
+        ErrorKind::AlphaNumeric,
+    )
+}
+
+#[allow(dead_code)]
+fn query_params(input: &str) -> Res<&str, QueryParams> {
+    context(
+        "query_params",
+        tuple((
+            tag("?"),
+            url_code_points,
+            tag("="),
+            url_code_points,
+            many0(tuple((
+                tag("&"),
+                url_code_points,
+                tag("="),
+                url_code_points,
+            ))),
+        )),
+    )(input)
+    .map(
+        |(next_input, (_, first_param, _, first_value, remaning_query_params))| {
+            let mut qps = Vec::new();
+            qps.push((first_param, first_value));
+            for (_, param, _, value) in remaning_query_params {
+                qps.push((param, value))
+            }
+            (next_input, qps)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -126,12 +207,6 @@ mod tests {
         error::{ErrorKind, VerboseError, VerboseErrorKind},
         Err as NomErr,
     };
-
-    #[test]
-    fn test_n_to_m_digits() {
-        let mut one_digit = n_to_m_digits(1, 1);
-        assert_eq!(one_digit("123"), Ok(("23", String::from("1"))));
-    }
 
     #[test]
     fn test_scheme() {
@@ -212,6 +287,57 @@ mod tests {
                     (".com", VerboseErrorKind::Context("host")),
                 ]
             })),
+        );
+    }
+
+    #[test]
+    fn test_n_to_m_digits() {
+        let mut one_digit = n_to_m_digits(1, 1);
+        assert_eq!(one_digit("123"), Ok(("23", String::from("1"))));
+    }
+
+    #[test]
+    fn test_ipv4() {
+        assert_eq!(
+            ip("192.168.0.1:8080"),
+            Ok((":8080", Host::IP([192, 168, 0, 1])))
+        );
+
+        assert_eq!(ip("0.0.0.0:8080"), Ok((":8080", Host::IP([0, 0, 0, 0]))));
+
+        assert_eq!(
+            ip("1924.168.0.1:8080"),
+            Err(NomErr::Error(VerboseError {
+                errors: vec![
+                    ("4.168.0.1:8080", VerboseErrorKind::Nom(ErrorKind::Tag)),
+                    ("1924.168.0.1:8080", VerboseErrorKind::Nom(ErrorKind::Count)),
+                    ("1924.168.0.1:8080", VerboseErrorKind::Context("ip")),
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn test_path() {
+        assert_eq!(path("/a/b/c?d"), Ok(("?d", vec!["a", "b", "c"])));
+        assert_eq!(path("/a/b/c/?d"), Ok(("?d", vec!["a", "b", "c"])));
+        assert_eq!(path("/a/b-c-d/c?d"), Ok(("?d", vec!["a", "b-c-d", "c"])));
+        assert_eq!(path("/a/1234/c?d"), Ok(("?d", vec!["a", "1234", "c"])));
+        assert_eq!(
+            path("/a/1234/c.txt?d"),
+            Ok(("?d", vec!["a", "1234", "c.txt"]))
+        );
+    }
+
+    #[test]
+    fn test_query_params() {
+        assert_eq!(
+            query_params("?foo=5&bar=foobar#baz"),
+            Ok(("#baz", vec![("foo", "5"), ("bar", "foobar")]))
+        );
+        assert_eq!(
+            query_params("?foo-bar=bar-foo#baz"),
+            Ok(("#baz", vec![("foo-bar", "bar-foo")]))
         );
     }
 }
