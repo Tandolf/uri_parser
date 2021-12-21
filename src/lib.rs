@@ -5,21 +5,18 @@ use nom::{
     combinator::opt,
     error::{context, ErrorKind, VerboseError},
     multi::{count, many0, many1, many_m_n},
-    sequence::{separated_pair, terminated, tuple},
+    sequence::{preceded, separated_pair, terminated, tuple},
     AsChar, Err as NomErr, IResult, InputTakeAtPosition,
 };
 
-#[allow(dead_code)]
 type Res<T, U> = IResult<T, U, VerboseError<T>>;
 type Authority<'a> = (&'a str, Option<&'a str>);
-#[allow(dead_code)]
 type QueryParam<'a> = (&'a str, &'a str);
-#[allow(dead_code)]
 type QueryParams<'a> = Vec<QueryParam<'a>>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct URI<'a> {
-    schema: Scheme,
+    scheme: Scheme,
     authority: Option<Authority<'a>>,
     host: Host,
     port: Option<u16>,
@@ -50,7 +47,6 @@ impl From<&str> for Scheme {
     }
 }
 
-#[allow(dead_code)]
 fn scheme(input: &str) -> Res<&str, Scheme> {
     context(
         "scheme",
@@ -59,7 +55,6 @@ fn scheme(input: &str) -> Res<&str, Scheme> {
     .map(|(next_input, res)| (next_input, res.into()))
 }
 
-#[allow(dead_code)]
 fn authority(input: &str) -> Res<&str, (&str, Option<&str>)> {
     context(
         "authority",
@@ -70,7 +65,6 @@ fn authority(input: &str) -> Res<&str, (&str, Option<&str>)> {
     )(input)
 }
 
-#[allow(dead_code)]
 fn ip_or_host(input: &str) -> Res<&str, Host> {
     context("ip or host", alt((ip, host)))(input)
 }
@@ -130,6 +124,15 @@ fn ip_num(input: &str) -> Res<&str, u8> {
     })
 }
 
+fn port(input: &str) -> Res<&str, u16> {
+    context("port", preceded(tag(":"), n_to_m_digits(2, 4)))(input).and_then(
+        |(next_result, res)| match res.parse::<u16>() {
+            Ok(n) => Ok((next_result, n)),
+            Err(_) => Err(NomErr::Error(VerboseError { errors: vec![] })),
+        },
+    )
+}
+
 fn n_to_m_digits<'a>(n: usize, m: usize) -> impl FnMut(&'a str) -> Res<&str, String> {
     move |input| {
         many_m_n(n, m, one_of("0123456789"))(input)
@@ -137,7 +140,6 @@ fn n_to_m_digits<'a>(n: usize, m: usize) -> impl FnMut(&'a str) -> Res<&str, Str
     }
 }
 
-#[allow(dead_code)]
 fn path(input: &str) -> Res<&str, Vec<&str>> {
     context(
         "path",
@@ -170,7 +172,6 @@ where
     )
 }
 
-#[allow(dead_code)]
 fn query_params(input: &str) -> Res<&str, QueryParams> {
     context(
         "query_params",
@@ -197,6 +198,41 @@ fn query_params(input: &str) -> Res<&str, QueryParams> {
             (next_input, qps)
         },
     )
+}
+
+fn fragment(input: &str) -> Res<&str, &str> {
+    context("fragment", tuple((tag("#"), url_code_points)))(input)
+        .map(|(next_input, res)| (next_input, res.1))
+}
+
+pub fn uri(input: &str) -> Res<&str, URI> {
+    context(
+        "uri",
+        tuple((
+            scheme,
+            opt(authority),
+            ip_or_host,
+            opt(port),
+            opt(path),
+            opt(query_params),
+            opt(fragment),
+        )),
+    )(input)
+    .map(|(next_input, res)| {
+        let (scheme, authority, host, port, path, query, fragment) = res;
+        (
+            next_input,
+            URI {
+                scheme,
+                authority,
+                host,
+                port,
+                path,
+                query,
+                fragment,
+            },
+        )
+    })
 }
 
 #[cfg(test)]
@@ -318,6 +354,11 @@ mod tests {
     }
 
     #[test]
+    fn test_port() {
+        assert_eq!(port(":8080"), Ok(("", 8080)));
+    }
+
+    #[test]
     fn test_path() {
         assert_eq!(path("/a/b/c?d"), Ok(("?d", vec!["a", "b", "c"])));
         assert_eq!(path("/a/b/c/?d"), Ok(("?d", vec!["a", "b", "c"])));
@@ -339,5 +380,49 @@ mod tests {
             query_params("?foo-bar=bar-foo#baz"),
             Ok(("#baz", vec![("foo-bar", "bar-foo")]))
         );
+    }
+
+    #[test]
+    fn test_fragment() {
+        assert_eq!(fragment("#foobar"), Ok(("", "foobar")));
+        assert_eq!(fragment("#foo-bar"), Ok(("", "foo-bar")));
+    }
+
+    #[test]
+    fn test_uri() {
+        assert_eq!(
+            uri("https://www.github.com/tandolf"),
+            Ok((
+                "",
+                URI {
+                    scheme: Scheme::HTTPS,
+                    authority: None,
+                    host: Host::HOST("www.github.com".to_string()),
+                    port: None,
+                    path: Some(vec!["tandolf"]),
+                    query: None,
+                    fragment: None
+                }
+            ))
+        )
+    }
+
+    #[test]
+    fn test_complex_uri() {
+        assert_eq!(
+            uri("http://thomas:password123@localhost:8080/tandolf?foobar=foo&bar=baz#home"),
+            Ok((
+                "",
+                URI {
+                    scheme: Scheme::HTTP,
+                    authority: Some(("thomas", Some("password123"))),
+                    host: Host::HOST("localhost".to_string()),
+                    port: Some(8080),
+                    path: Some(vec!["tandolf"]),
+                    query: Some(vec![("foobar", "foo"), ("bar", "baz")]),
+                    fragment: Some("home")
+                }
+            ))
+        )
     }
 }
